@@ -1,0 +1,51 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Battery Tab</title>
+    <!-- The link element the code will target to change the favicon -->
+    <link id="favicon" rel="icon" type="image/png" href="">
+</head>
+<body>
+    <h1>Battery Favicon Monitor</h1>
+    <p>Keep this tab open. The favicon will show your battery percentage.</p>
+
+    <script>
+        const favicon = document.getElementById('favicon');
+        const canvas = document.createElement('canvas');
+        canvas.width = 16;
+        canvas.height = 16;
+        const ctx = canvas.getContext('2d');
+
+        function updateFavicon(percentage) {
+            // Clear canvas
+            ctx.clearRect(0, 0, 16, 16);
+            
+            // Draw background indicator block
+            ctx.fillStyle = percentage > 20 ? '#00FF00' : '#FF0000'; // Green if safe, Red if low
+            ctx.fillRect(0, 0, 16, 16);
+            
+            // Draw text overlay
+            ctx.fillStyle = '#000000';
+            ctx.font = 'bold 10px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+            ctx.fillText(percentage, 8, 8);
+            
+            // Push canvas image into the favicon tag
+            favicon.href = canvas.toDataURL('image/png');
+        }
+
+        // Request browser permission for device battery status data
+        navigator.getBattery().then(function(battery) {
+            function updateAll() {
+                updateFavicon(Math.round(battery.level * 100));
+            }
+            
+            updateAll();
+            // Listen for percentage adjustments over time
+            battery.addEventListener('levelchange', updateAll);
+        });
+    </script>
+</body>
+</html>
