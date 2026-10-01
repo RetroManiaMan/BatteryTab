@@ -104,7 +104,8 @@ input[type=range]{width:100%;accent-color:var(--c2)}
 
 <script>
 const $ = id => document.getElementById(id);
-const favicon = $('favicon'), bar = $('bar');
+let favicon = $('favicon');
+const bar = $('bar');
 const CIRC = 2 * Math.PI * 86;
 const canvas = document.createElement('canvas');
 canvas.width = canvas.height = 64;
@@ -188,7 +189,10 @@ function drawFavicon(p, charging) {
     if (charging) bolt(54, 10, 16, '#0d0b1f');
   }
   const url = canvas.toDataURL('image/png');
-  favicon.href = url;
+  const next = document.createElement('link');
+  next.id = 'favicon'; next.rel = 'icon'; next.type = 'image/png'; next.href = url;
+  favicon.replaceWith(next);
+  favicon = next;
   ['p64', 'p32', 'p16'].forEach(id => $(id).src = url);
 }
 
@@ -233,11 +237,60 @@ function startDemo() {
   go();
 }
 
+// ---- Background-proof battery tracking ----
+// Hidden tabs get throttled, and Chrome can garbage-collect a BatteryManager that
+// nothing references. So we (a) keep a global reference, (b) re-read the battery on a
+// timer that runs in a Web Worker (not throttled like page timers), (c) re-read on
+// every visibility/focus change, and (d) hold a Web Lock so the tab is less likely
+// to be frozen.
+let batteryRef = null;
+let lastKey = '';
+const watched = new WeakSet();
+let tickerWorker = null;
+
+function sync(bat) {
+  const level = Math.round(bat.level * 100);
+  const key = [level, bat.charging, bat.chargingTime, bat.dischargingTime].join('|');
+  if (key === lastKey) return;
+  lastKey = key;
+  render(level, bat.charging, bat.chargingTime, bat.dischargingTime);
+}
+
+function watch(bat) {
+  batteryRef = bat;
+  if (!watched.has(bat)) {
+    watched.add(bat);
+    ['levelchange', 'chargingchange', 'chargingtimechange', 'dischargingtimechange']
+      .forEach(e => bat.addEventListener(e, () => sync(bat)));
+  }
+  sync(bat);
+}
+
+// Asking for a fresh BatteryManager each time also recovers if the old one went stale.
+async function poll() {
+  try { watch(await navigator.getBattery()); } catch (e) {}
+}
+
+function startTicker(fn, ms) {
+  try {
+    const src = `setInterval(() => postMessage(0), ${ms});`;
+    tickerWorker = new Worker(URL.createObjectURL(new Blob([src], {type: 'text/javascript'})));
+    tickerWorker.onmessage = fn;
+  } catch (e) {
+    setInterval(fn, ms); // fallback if workers are blocked
+  }
+}
+
 if ('getBattery' in navigator) {
   navigator.getBattery().then(bat => {
-    const update = () => render(Math.round(bat.level * 100), bat.charging, bat.chargingTime, bat.dischargingTime);
-    update();
-    ['levelchange', 'chargingchange', 'chargingtimechange', 'dischargingtimechange'].forEach(e => bat.addEventListener(e, update));
+    watch(bat);
+    startTicker(poll, 5000);
+    document.addEventListener('visibilitychange', poll);
+    window.addEventListener('focus', poll);
+    window.addEventListener('pageshow', poll);
+    if (navigator.locks) {
+      navigator.locks.request('batterytab-keepalive', () => new Promise(() => {})).catch(() => {});
+    }
   }).catch(startDemo);
 } else {
   startDemo();
