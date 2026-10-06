@@ -88,8 +88,9 @@ input[type=range]{width:100%;accent-color:var(--c2)}
   </section>
 
   <section class="card demo" id="bridge">
-    <label>Firefox and Safari don't let websites read your battery, so BatteryTab uses a tiny helper on your computer. <a href="batterytab-helper.py" download>Download the helper</a>, then run it in Terminal. This page connects on its own.</label>
+    <label id="bridgeMsg"></label>
     <code>python3 batterytab-helper.py</code>
+    <div class="chips" id="connectRow" style="margin-top:12px;display:none"><button id="connect">Connect to helper</button></div>
   </section>
 
   <section class="card fav">
@@ -259,19 +260,34 @@ function startDemo() {
 }
 
 // ---- Live battery tracking ----
-// Chromium browsers expose navigator.getBattery(). Firefox and Safari removed it for
-// privacy, so there we read from a tiny local helper (batterytab-helper.py) instead.
-// Either way: keep a global reference, tick from a Web Worker (not throttled like page
-// timers), re-read on visibility/focus, and hold a Web Lock to resist tab freezing.
-const useBridge = !('getBattery' in navigator);
+// Chrome's Battery API is tied to page visibility: while a tab is in the background the
+// browser stops handing it new readings (no timer or worker can change that). Firefox and
+// Safari have no battery API at all. So BatteryTab can also read from a tiny local helper
+// (batterytab-helper.py) that asks the OS directly, which works in the background.
+const hasNative = 'getBattery' in navigator;
 const BRIDGE_URL = 'http://127.0.0.1:8765/battery';
+let helperPref = false;
+try { helperPref = localStorage.getItem('bt-helper') === '1'; } catch (e) {}
 let batteryRef = null, tickerWorker = null, lastKey = '';
-let lastTick = 0, lastChange = 0, pause = null, bridgeUp = false, mode = 'none';
+let lastTick = 0, lastChange = 0, pause = null, bridgeUp = false, mode = 'none', hiddenAt = 0;
 const watched = new WeakSet();
 const clock = t => new Date(t).toLocaleTimeString([], {hour: '2-digit', minute: '2-digit', second: '2-digit'});
+const probeHelper = () => !hasNative || helperPref; // Chrome only probes once you opt in
+
+function showSetup(chromeHint) {
+  const link = '<a href="batterytab-helper.py" download>download the helper</a>';
+  $('bridgeMsg').innerHTML = chromeHint
+    ? `Chrome pauses battery updates while a tab is in the background, so BatteryTab missed some changes while you were away. For tracking that keeps working in the background, ${link} and run it in Terminal, then tap Connect.`
+    : `Firefox and Safari don't let websites read your battery, so BatteryTab uses a tiny helper on your computer. Please ${link}, then run it in Terminal. This page connects on its own.`;
+  $('connectRow').style.display = chromeHint ? '' : 'none';
+  $('connect').textContent = 'Connect to helper';
+  $('bridge').classList.add('on');
+}
 
 function updateDiag() {
-  const parts = [mode === 'native' ? 'Live' : mode === 'helper' ? 'Live via helper' : 'Preview'];
+  const label = mode === 'helper' ? 'Live via helper (works in the background)'
+              : mode === 'native' ? 'Live while this tab is visible' : 'Preview';
+  const parts = [label];
   if (lastTick) parts.push('checked ' + clock(lastTick));
   if (lastChange) parts.push('changed ' + clock(lastChange));
   if (pause) parts.push(`browser paused this tab for ${fmt(pause.ms / 1000)} (resumed ${clock(pause.at)})`);
@@ -293,9 +309,9 @@ function watch(bat) {
   if (!watched.has(bat)) {
     watched.add(bat);
     ['levelchange', 'chargingchange', 'chargingtimechange', 'dischargingtimechange']
-      .forEach(e => bat.addEventListener(e, () => sync(bat)));
+      .forEach(e => bat.addEventListener(e, () => { if (!bridgeUp) sync(bat); }));
   }
-  sync(bat);
+  if (!bridgeUp) sync(bat);
 }
 
 async function poll() {
@@ -314,15 +330,17 @@ async function pollBridge() {
     sync({level: d.level / 100, charging: !!d.charging,
           chargingTime: d.chargingTime ?? Infinity, dischargingTime: d.dischargingTime ?? Infinity});
   } catch (e) {
-    if (bridgeUp || mode === 'none') {
-      bridgeUp = false; mode = 'preview';
-      $('bridge').classList.add('on');
-      startDemo();
-    }
+    const wasUp = bridgeUp;
+    bridgeUp = false;
+    if (!hasNative && (wasUp || mode === 'none')) { mode = 'preview'; showSetup(false); startDemo(); }
+    else if (wasUp && hasNative) mode = 'native';
   }
 }
 
-const refresh = () => useBridge ? pollBridge() : poll();
+async function refresh() {
+  if (probeHelper()) await pollBridge();
+  if (!bridgeUp && hasNative) await poll();
+}
 
 function tick() {
   const now = Date.now();
@@ -341,29 +359,37 @@ function startTicker(fn, ms) {
   }
 }
 
-function startKeepAlive() {
-  startTicker(tick, 5000);
-  document.addEventListener('visibilitychange', refresh);
-  window.addEventListener('focus', refresh);
-  window.addEventListener('pageshow', refresh);
-  if (navigator.locks) {
-    navigator.locks.request('batterytab-keepalive', () => new Promise(() => {})).catch(() => {});
-  }
-  lastTick = Date.now();
-}
+document.addEventListener('visibilitychange', async () => {
+  if (document.hidden) { hiddenAt = Date.now(); return; }
+  const before = last.level;
+  await refresh();
+  // If Chrome's own reading jumps after we return, we missed updates while hidden.
+  await new Promise(r => setTimeout(r, 1500));
+  if (hasNative && !bridgeUp && hiddenAt && Date.now() - hiddenAt > 20000 && before !== null && last.level !== before) showSetup(true);
+});
+window.addEventListener('focus', () => refresh().finally(updateDiag));
+window.addEventListener('pageshow', () => refresh().finally(updateDiag));
 
-if (!useBridge) {
-  navigator.getBattery().then(bat => {
-    mode = 'native';
-    watch(bat);
-    startKeepAlive();
-    updateDiag();
-  }).catch(startDemo);
-} else {
-  $('state').textContent = 'Looking for helper…';
-  startKeepAlive();
-  pollBridge().finally(updateDiag);
-}
+$('connect').addEventListener('click', async () => {
+  helperPref = true;
+  try { localStorage.setItem('bt-helper', '1'); } catch (e) {}
+  await pollBridge();
+  if (!bridgeUp) $('connect').textContent = "Couldn't find it. Start the helper, then tap again";
+  updateDiag();
+});
+
+(async () => {
+  startTicker(tick, 5000);
+  if (navigator.locks) navigator.locks.request('batterytab-keepalive', () => new Promise(() => {})).catch(() => {});
+  lastTick = Date.now();
+  if (!hasNative) $('state').textContent = 'Looking for helper…';
+  if (probeHelper()) await pollBridge();
+  if (!bridgeUp && hasNative) {
+    try { mode = 'native'; watch(await navigator.getBattery()); }
+    catch (e) { mode = 'none'; startDemo(); }
+  }
+  updateDiag();
+})();
 </script>
 </body>
 </html>
