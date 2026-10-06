@@ -1,16 +1,19 @@
+[README.md](https://github.com/user-attachments/files/33129510/README.md)
 # BatteryTab
 ClockTab but for viewing your battery status. Your battery percentage, live in the page *and* in the tab icon.
 
-## Chrome, Edge, Brave, Opera
-Just open `index.html` (or your hosted copy) and pin the tab. Nothing else needed.
+## How it works
+- **Chrome, Edge, Brave, Opera:** BatteryTab reads the browser's Battery API. Chrome only delivers readings
+  while the tab is visible, so the icon freezes while you're on another tab and catches up when you return.
+- **Always-on tracking (any browser):** run the helper. It reads your battery from the OS, so the tab icon keeps
+  updating even when the tab is in the background.
+- **Firefox and Safari:** they have no battery API, so the helper is required.
 
-## Firefox and Safari
-These browsers don't let websites read your battery, so BatteryTab uses a tiny helper:
-
+## The helper
 ```
 python3 batterytab-helper.py
 ```
-
-Keep it running and the page connects on its own (macOS, Linux and Windows; Python 3, no installs).
-Add `--origin https://your-site` to only allow your own site to read it. Your browser may ask
-permission to access the local network the first time: click Allow.
+Works on macOS, Linux and Windows (Python 3, nothing to install). Keep it running.
+- Firefox/Safari connect automatically. In Chrome, tap **Connect to helper** once.
+- Add `--origin https://your-site` to only allow your own site to read it.
+- Your browser may ask for local network permission the first time: click Allow.
