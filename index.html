@@ -277,7 +277,7 @@ const probeHelper = () => !hasNative || helperPref; // Chrome only probes once y
 function showSetup(chromeHint) {
   const link = '<a href="batterytab-helper.py" download>download the helper</a>';
   $('bridgeMsg').innerHTML = chromeHint
-    ? `Chrome pauses battery updates while a tab is in the background, so BatteryTab missed some changes while you were away. For tracking that keeps working in the background, ${link} and run it in Terminal, then tap Connect.`
+    ? `Chrome pauses battery updates while this tab is in the background or on another desktop, so BatteryTab refreshes itself when you come back. For tracking that keeps going while you're away, ${link} and run it in Terminal, then tap Connect.`
     : `Firefox and Safari don't let websites read your battery, so BatteryTab uses a tiny helper on your computer. Please ${link}, then run it in Terminal. This page connects on its own.`;
   $('connectRow').style.display = chromeHint ? '' : 'none';
   $('connect').textContent = 'Connect to helper';
@@ -320,7 +320,7 @@ async function poll() {
 
 async function pollBridge() {
   try {
-    const r = await fetch(BRIDGE_URL, {cache: 'no-store'});
+    const r = await fetch(BRIDGE_URL, {cache: 'no-store', signal: AbortSignal.timeout(4000)});
     if (!r.ok) throw new Error('no battery');
     const d = await r.json();
     if (!bridgeUp) {
@@ -359,15 +359,25 @@ function startTicker(fn, ms) {
   }
 }
 
-document.addEventListener('visibilitychange', async () => {
+// Self-heal for Chrome: after the tab was hidden (background tab, or another macOS desktop)
+// its Battery API connection can stay dead until a reload. So when you come back, reload once.
+function maybeRecover() {
+  if (!hasNative || bridgeUp || !hiddenAt || Date.now() - hiddenAt < 15000) return;
+  try {
+    if (Date.now() - (+sessionStorage.getItem('bt-reload') || 0) < 20000) return;
+    sessionStorage.setItem('bt-reload', Date.now());
+    if (last.level !== null) sessionStorage.setItem('bt-prev', last.level);
+  } catch (e) {}
+  location.reload();
+}
+
+document.addEventListener('visibilitychange', () => {
   if (document.hidden) { hiddenAt = Date.now(); return; }
-  const before = last.level;
-  await refresh();
-  // If Chrome's own reading jumps after we return, we missed updates while hidden.
-  await new Promise(r => setTimeout(r, 1500));
-  if (hasNative && !bridgeUp && hiddenAt && Date.now() - hiddenAt > 20000 && before !== null && last.level !== before) showSetup(true);
+  maybeRecover();
+  hiddenAt = 0;
+  refresh().finally(updateDiag);
 });
-window.addEventListener('focus', () => refresh().finally(updateDiag));
+window.addEventListener('focus', () => { maybeRecover(); refresh().finally(updateDiag); });
 window.addEventListener('pageshow', () => refresh().finally(updateDiag));
 
 $('connect').addEventListener('click', async () => {
@@ -380,12 +390,17 @@ $('connect').addEventListener('click', async () => {
 
 (async () => {
   startTicker(tick, 5000);
+  setInterval(tick, 15000); // backup in case the worker ticker ever stalls
   if (navigator.locks) navigator.locks.request('batterytab-keepalive', () => new Promise(() => {})).catch(() => {});
   lastTick = Date.now();
   if (!hasNative) $('state').textContent = 'Looking for helper…';
   if (probeHelper()) await pollBridge();
   if (!bridgeUp && hasNative) {
-    try { mode = 'native'; watch(await navigator.getBattery()); }
+    try {
+      mode = 'native'; watch(await navigator.getBattery());
+      const prev = sessionStorage.getItem('bt-prev'); sessionStorage.removeItem('bt-prev');
+      if (prev !== null && last.level !== null && +prev !== last.level) showSetup(true);
+    }
     catch (e) { mode = 'none'; startDemo(); }
   }
   updateDiag();
